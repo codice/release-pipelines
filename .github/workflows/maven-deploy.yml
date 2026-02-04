@@ -1,0 +1,137 @@
+# Re-deploy from Existing Tag
+#
+# Use this when:
+# - Release pipeline failed after tagging but during deploy
+# - Nexus lost artifacts and you need to republish
+# - You need to push to a different repository
+#
+# This does NOT:
+# - Bump versions
+# - Create tags
+# - Push to git
+# - Create GitHub releases
+
+name: Re-deploy Tag
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to deploy (e.g., ddf-2.29.0)'
+        required: true
+        type: string
+      jdkVersion:
+        description: 'JDK version'
+        required: true
+        default: '11'
+        type: choice
+        options:
+          - '8'
+          - '11'
+          - '17'
+      testRun:
+        description: 'Test run (no actual deployment)'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Validate Tag Exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${{ inputs.tag }}"
+          echo "Checking if tag '$TAG' exists..."
+          
+          if ! gh api repos/${{ github.repository }}/git/refs/tags/${TAG} > /dev/null 2>&1; then
+            echo "::error::Tag '$TAG' does not exist in this repository"
+            exit 1
+          fi
+          
+          echo "✅ Tag '$TAG' exists"
+
+      - name: Setup JDK ${{ inputs.jdkVersion }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.jdkVersion }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Checkout Tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          fetch-depth: 1
+
+      - name: Create Maven Settings
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << 'EOF'
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>${env.GITHUB_ACTOR}</username>
+                <password>${env.GITHUB_TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Verify Version Matches Tag
+        run: |
+          POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          TAG="${{ inputs.tag }}"
+          
+          echo "POM version: $POM_VERSION"
+          echo "Tag: $TAG"
+          
+          # Extract version from tag (assumes format like "ddf-2.29.0" or "app-1.2.3")
+          TAG_VERSION="${TAG##*-}"
+          
+          if [[ "$POM_VERSION" != "$TAG_VERSION" ]]; then
+            echo "::warning::POM version ($POM_VERSION) doesn't match tag version ($TAG_VERSION)"
+            echo "This might be expected for some tag naming conventions"
+          fi
+
+      - name: Maven Deploy
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "${{ inputs.testRun }}" == "true" ]]; then
+            echo "🧪 TEST RUN - Would execute:"
+            echo "mvn deploy -B -Prelease -DskipStatic=true -DskipTests=true -DretryFailedDeploymentCount=10"
+            echo ""
+            echo "Validating build would work..."
+            mvn validate -B -Prelease
+          else
+            echo "Deploying ${{ inputs.tag }} to GitHub Packages..."
+            mvn deploy -B -Prelease \
+              -DskipStatic=true \
+              -DskipTests=true \
+              -DretryFailedDeploymentCount=10 \
+              -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
+          fi
+
+      - name: Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## Re-deploy Summary
+          
+          | Setting | Value |
+          |---------|-------|
+          | Tag | ${{ inputs.tag }} |
+          | JDK | ${{ inputs.jdkVersion }} |
+          | Test Run | ${{ inputs.testRun }} |
+          
+          EOF
+          
+          if [[ "${{ inputs.testRun }}" == "true" ]]; then
+            echo "⚠️ **TEST RUN - No artifacts were deployed**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Artifacts deployed to GitHub Packages**" >> $GITHUB_STEP_SUMMARY
+          fi

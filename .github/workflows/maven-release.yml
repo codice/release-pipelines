@@ -1,0 +1,407 @@
+# Generic Release Workflow - Reusable for DDF, Alliance, Admin Console, DIB, etc.
+#
+# This is a REUSABLE workflow. Call it from each repo like this:
+#
+# .github/workflows/release.yml:
+# ```yaml
+# name: Release
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       branch:
+#         description: 'Branch to release'
+#         required: true
+#         default: 'master'
+#       releaseType:
+#         description: 'Release type'
+#         required: true
+#         default: 'Build'
+#         type: choice
+#         options: [Build, Release, RC1, RC2, RC3]
+#       nextDevVersion:
+#         description: 'Next dev version (blank = auto)'
+#         required: false
+#       skipTests:
+#         description: 'Skip tests'
+#         default: true
+#         type: boolean
+#       testRun:
+#         description: 'Test run only'
+#         default: false
+#         type: boolean
+#
+# jobs:
+#   release:
+#     uses: codice/release-pipelines/.github/workflows/maven-release.yml@main
+#     with:
+#       app_name: 'ddf'
+#       branch: ${{ inputs.branch }}
+#       release_type: ${{ inputs.releaseType }}
+#       next_dev_version: ${{ inputs.nextDevVersion }}
+#       skip_tests: ${{ inputs.skipTests }}
+#       test_run: ${{ inputs.testRun }}
+#       jdk_version_map: '{"master":"17","2.29.x":"17","2.28.x":"11","2.27.x":"11","default":"11"}'
+#       artifact_path: 'distribution/ddf/target'
+#     secrets:
+#       ssh_key: ${{ secrets.RELEASE_SSH_KEY }}
+#       nexus_username: ${{ secrets.NEXUS_USERNAME }}
+#       nexus_password: ${{ secrets.NEXUS_PASSWORD }}
+#       release_token: ${{ secrets.RELEASE_TOKEN }}
+# ```
+
+name: Maven Release (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: 'Application name (used in tag prefix)'
+        required: true
+        type: string
+      branch:
+        description: 'Branch to release'
+        required: true
+        type: string
+      release_type:
+        description: 'Release type: Build, Release, RC1, RC2, RC3'
+        required: true
+        type: string
+      next_dev_version:
+        description: 'Next development version (blank = auto-increment)'
+        required: false
+        type: string
+        default: ''
+      skip_tests:
+        description: 'Skip tests during release'
+        required: false
+        type: boolean
+        default: true
+      test_run:
+        description: 'Test run - no actual deployment'
+        required: false
+        type: boolean
+        default: false
+      jdk_version_map:
+        description: 'JSON map of branch -> JDK version'
+        required: false
+        type: string
+        default: '{"default":"11"}'
+      artifact_path:
+        description: 'Path to distribution artifact directory'
+        required: false
+        type: string
+        default: 'target'
+      maven_deploy_profiles:
+        description: 'Maven profiles for deploy (comma-separated)'
+        required: false
+        type: string
+        default: 'release'
+      author_name:
+        description: 'Git author name'
+        required: false
+        type: string
+        default: 'Release Manager'
+      author_email:
+        description: 'Git author email'
+        required: false
+        type: string
+        default: 'release@example.com'
+    
+    secrets:
+      app_id:
+        description: 'GitHub App ID'
+        required: true
+      app_private_key:
+        description: 'GitHub App private key'
+        required: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      token: ${{ steps.app-token.outputs.token }}
+    steps:
+      - name: Generate App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.app_id }}
+          private-key: ${{ secrets.app_private_key }}
+
+      - name: Check CI Status on Branch
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          REPO="${{ github.repository }}"
+          BRANCH="${{ inputs.branch }}"
+          
+          echo "Checking CI status for $REPO branch: $BRANCH"
+          
+          # Get the latest commit SHA for the branch
+          COMMIT_SHA=$(gh api repos/${REPO}/branches/${BRANCH} --jq '.commit.sha')
+          echo "Latest commit: $COMMIT_SHA"
+          
+          # Get combined status (for external CI systems)
+          STATUS=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/status --jq '.state')
+          echo "Combined status: $STATUS"
+          
+          # Check for check runs (GitHub Actions)
+          FAILED=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "cancelled")] | length')
+          PENDING=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select(.status == "in_progress" or .status == "queued")] | length')
+          
+          if [[ "$PENDING" -gt 0 ]]; then
+            echo "::error::CI checks are still running. Wait for CI to complete."
+            exit 1
+          fi
+          
+          if [[ "$FAILED" -gt 0 ]]; then
+            echo "::error::CI is failing on $BRANCH. Fix CI before releasing."
+            gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '.check_runs[] | select(.conclusion == "failure") | "  - \(.name): \(.conclusion)"'
+            exit 1
+          fi
+          
+          if [[ "$STATUS" == "failure" || "$STATUS" == "error" ]]; then
+            echo "::error::Commit status is $STATUS. Fix before releasing."
+            exit 1
+          fi
+          
+          echo "✅ CI is green on $BRANCH"
+
+  release:
+    needs: preflight
+    runs-on: ubuntu-latest
+    
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      release_version: ${{ steps.version.outputs.release_version }}
+    
+    steps:
+      - name: Determine JDK Version
+        id: jdk
+        run: |
+          JDK_MAP='${{ inputs.jdk_version_map }}'
+          BRANCH="${{ inputs.branch }}"
+          
+          # Try to get version for specific branch, fall back to default
+          VERSION=$(echo "$JDK_MAP" | jq -r --arg b "$BRANCH" '.[$b] // .default // "11"')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Using JDK $VERSION for branch $BRANCH"
+
+      - name: Setup JDK
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ steps.jdk.outputs.version }}
+          distribution: 'temurin'
+          cache: 'maven'
+
+      - name: Generate App Token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.app_id }}
+          private-key: ${{ secrets.app_private_key }}
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "${{ inputs.author_name }}"
+          git config user.email "${{ inputs.author_email }}"
+          # Configure git to use token for push
+          git config http.https://github.com/.extraheader "Authorization: Basic $(echo -n 'x-access-token:${{ steps.app-token.outputs.token }}' | base64 -w0)"
+
+      - name: Calculate Versions
+        id: version
+        run: |
+          # Get current version from pom.xml
+          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
+          
+          APP_NAME="${{ inputs.app_name }}"
+          RELEASE_TYPE="${{ inputs.release_type }}"
+          BUILD_NUM=""
+          SNAPSHOT_BUILD=false
+          RC_BUILD=false
+          DEPLOY_PROFILE="${{ inputs.maven_deploy_profiles }}"
+          
+          case "$RELEASE_TYPE" in
+            Build)
+              BUILD_NUM="build_$(date +%Y%m%d%H%M)"
+              SNAPSHOT_BUILD=true
+              DEPLOY_PROFILE="${DEPLOY_PROFILE},codice-staging"
+              ;;
+            RC*)
+              BUILD_NUM="$RELEASE_TYPE"
+              RC_BUILD=true
+              ;;
+          esac
+          
+          # Calculate versions
+          if [[ -n "$BUILD_NUM" ]]; then
+            RELEASE_VERSION="${BASE_VERSION}-${BUILD_NUM}"
+          else
+            RELEASE_VERSION="$BASE_VERSION"
+          fi
+          
+          TAG="${APP_NAME}-${RELEASE_VERSION}"
+          
+          # Next dev version
+          if [[ "$SNAPSHOT_BUILD" == "true" ]]; then
+            DEV_VERSION="$CURRENT_VERSION"
+          elif [[ -n "${{ inputs.next_dev_version }}" ]]; then
+            DEV_VERSION="${{ inputs.next_dev_version }}"
+          else
+            MAJOR_MINOR="${BASE_VERSION%.*}"
+            PATCH="${BASE_VERSION##*.}"
+            DEV_VERSION="${MAJOR_MINOR}.$((PATCH + 1))-SNAPSHOT"
+          fi
+          
+          # Output all values
+          cat >> $GITHUB_OUTPUT << EOF
+          tag=$TAG
+          release_version=$RELEASE_VERSION
+          dev_version=$DEV_VERSION
+          snapshot_build=$SNAPSHOT_BUILD
+          rc_build=$RC_BUILD
+          deploy_profile=$DEPLOY_PROFILE
+          EOF
+          
+          echo "::notice::Tag: $TAG | Version: $RELEASE_VERSION | Dev: $DEV_VERSION"
+
+      - name: Create Maven Settings
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml << EOF
+          <settings>
+            <servers>
+              <server>
+                <id>github</id>
+                <username>\${env.GITHUB_ACTOR}</username>
+                <password>\${env.GITHUB_TOKEN}</password>
+              </server>
+            </servers>
+          </settings>
+          EOF
+
+      - name: Maven Release Prepare
+        if: inputs.test_run == false
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          SKIP_ARGS=""
+          if [[ "${{ inputs.skip_tests }}" == "true" ]]; then
+            SKIP_ARGS='-Darguments="-DskipStatic=true -DskipTests=true"'
+          fi
+          
+          mvn -B \
+            -Dtag=${{ steps.version.outputs.tag }} \
+            -DreleaseVersion=${{ steps.version.outputs.release_version }} \
+            -DdevelopmentVersion=${{ steps.version.outputs.dev_version }} \
+            release:prepare -Prelease $SKIP_ARGS
+
+      - name: Maven Release Prepare (Test Run)
+        if: inputs.test_run == true
+        run: |
+          echo "🧪 TEST RUN - Would execute:"
+          echo "mvn -B -Dtag=${{ steps.version.outputs.tag }} \\"
+          echo "  -DreleaseVersion=${{ steps.version.outputs.release_version }} \\"
+          echo "  -DdevelopmentVersion=${{ steps.version.outputs.dev_version }} \\"
+          echo "  release:prepare -Prelease"
+
+      - name: Push Tags and Commits
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          BRANCH="${{ inputs.branch }}"
+          SNAPSHOT="${{ steps.version.outputs.snapshot_build }}"
+          RC="${{ steps.version.outputs.rc_build }}"
+          
+          if [[ "${{ inputs.test_run }}" == "true" ]]; then
+            echo "🧪 TEST RUN - Would push tag: $TAG"
+            [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]] && echo "🧪 TEST RUN - Would push branch: $BRANCH"
+          else
+            git push origin "$TAG"
+            if [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]]; then
+              git push origin "$BRANCH"
+            fi
+          fi
+
+      - name: Checkout Tag for Deploy
+        if: inputs.test_run == false
+        run: git checkout ${{ steps.version.outputs.tag }} -b release-tmp
+
+      - name: Maven Deploy
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          if [[ "${{ inputs.test_run }}" == "true" ]]; then
+            echo "🧪 TEST RUN - Would deploy to GitHub Packages"
+          else
+            mvn deploy -Prelease \
+              -DskipStatic=true -DskipTests=true \
+              -DretryFailedDeploymentCount=10
+          fi
+
+      - name: Find Artifacts
+        id: artifacts
+        if: inputs.release_type == 'Release'
+        run: |
+          ARTIFACT_DIR="${{ inputs.artifact_path }}"
+          TAG="${{ steps.version.outputs.tag }}"
+          
+          # Look for zip files
+          if [[ -d "$ARTIFACT_DIR" ]]; then
+            FILES=$(find "$ARTIFACT_DIR" -maxdepth 1 -name "*.zip" -type f | tr '\n' ',' | sed 's/,$//')
+            echo "files=$FILES" >> $GITHUB_OUTPUT
+            echo "Found artifacts: $FILES"
+          fi
+
+      - name: Create GitHub Release
+        if: inputs.release_type == 'Release' && inputs.test_run == false
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body: "Release ${{ steps.version.outputs.release_version }}"
+          files: ${{ steps.artifacts.outputs.files }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Cleanup Old Snapshot Tags
+        if: inputs.release_type == 'Release' && inputs.test_run == false
+        run: |
+          APP="${{ inputs.app_name }}"
+          VER="${{ steps.version.outputs.release_version }}"
+          
+          TAGS=$(git tag -l "${APP}-${VER}-build_*" 2>/dev/null || true)
+          if [[ -n "$TAGS" ]]; then
+            echo "Removing snapshot tags: $TAGS"
+            git push origin --delete $TAGS || true
+          fi
+
+      - name: Job Summary
+        run: |
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## ${{ inputs.app_name }} Release Summary
+          
+          | Setting | Value |
+          |---------|-------|
+          | App | ${{ inputs.app_name }} |
+          | Branch | ${{ inputs.branch }} |
+          | Type | ${{ inputs.release_type }} |
+          | Tag | ${{ steps.version.outputs.tag }} |
+          | Version | ${{ steps.version.outputs.release_version }} |
+          | Next Dev | ${{ steps.version.outputs.dev_version }} |
+          | JDK | ${{ steps.jdk.outputs.version }} |
+          | Test Run | ${{ inputs.test_run }} |
+          
+          EOF
+          
+          if [[ "${{ inputs.test_run }}" == "true" ]]; then
+            echo "⚠️ **TEST RUN - No changes were made**" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "✅ **Release completed successfully**" >> $GITHUB_STEP_SUMMARY
+          fi
