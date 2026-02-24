@@ -240,7 +240,8 @@ jobs:
         id: version
         run: |
           # Get current version from pom.xml
-          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "Resolved version: $CURRENT_VERSION"
           BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
           
           APP_NAME="${{ inputs.app_name }}"
