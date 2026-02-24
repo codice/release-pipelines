@@ -303,14 +303,14 @@ jobs:
         run: |
           SKIP_ARGS=""
           if [[ "${{ inputs.skip_tests }}" == "true" ]]; then
-            SKIP_ARGS='-Darguments="-DskipStatic=true -DskipTests=true"'
+            SKIP_ARGS="-Darguments=-DskipStatic=true\ -DskipTests=true"
           fi
-          
+
           mvn -B \
             -Dtag=${{ steps.version.outputs.tag }} \
             -DreleaseVersion=${{ steps.version.outputs.release_version }} \
             -DdevelopmentVersion=${{ steps.version.outputs.dev_version }} \
-            release:prepare -Prelease $SKIP_ARGS
+            release:prepare -Prelease "$SKIP_ARGS"
 
       - name: Maven Release Prepare (Test Run)
         if: inputs.test_run == true
