@@ -145,18 +145,18 @@ jobs:
           STATUS=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/status --jq '.state')
           echo "Combined status: $STATUS"
           
-          # Check for check runs (GitHub Actions)
-          FAILED=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select(.conclusion == "failure" or .conclusion == "cancelled")] | length')
-          PENDING=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select(.status == "in_progress" or .status == "queued")] | length')
-          
+          # Check for check runs (GitHub Actions), excluding this workflow's own runs
+          FAILED=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.conclusion == "failure" or .conclusion == "cancelled") and (.name | startswith("release /") | not))] | length')
+          PENDING=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.status == "in_progress" or .status == "queued") and (.name | startswith("release /") | not))] | length')
+
           if [[ "$PENDING" -gt 0 ]]; then
             echo "::error::CI checks are still running. Wait for CI to complete."
             exit 1
           fi
-          
+
           if [[ "$FAILED" -gt 0 ]]; then
             echo "::error::CI is failing on $BRANCH. Fix CI before releasing."
-            gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '.check_runs[] | select(.conclusion == "failure") | "  - \(.name): \(.conclusion)"'
+            gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '.check_runs[] | select(.conclusion == "failure" and (.name | startswith("release /") | not)) | "  - \(.name): \(.conclusion)"'
             exit 1
           fi
           
