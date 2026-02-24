@@ -240,7 +240,11 @@ jobs:
         id: version
         run: |
           # Get current version from pom.xml
-          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -DforceStdout)
+          echo "=== Maven settings.xml ==="
+          cat ~/.m2/settings.xml
+          echo "=== Running mvn help:evaluate ==="
+          mvn help:evaluate -Dexpression=project.version -DforceStdout 2>&1 | tee /tmp/mvn-output.txt || true
+          CURRENT_VERSION=$(grep -v '^\[' /tmp/mvn-output.txt | tail -1)
           echo "Resolved version: $CURRENT_VERSION"
           BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
           
