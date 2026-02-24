@@ -301,16 +301,14 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
-          SKIP_ARGS=""
+          MVN_ARGS="-B -Dtag=${{ steps.version.outputs.tag }}"
+          MVN_ARGS="$MVN_ARGS -DreleaseVersion=${{ steps.version.outputs.release_version }}"
+          MVN_ARGS="$MVN_ARGS -DdevelopmentVersion=${{ steps.version.outputs.dev_version }}"
           if [[ "${{ inputs.skip_tests }}" == "true" ]]; then
-            SKIP_ARGS="-Darguments=-DskipStatic=true\ -DskipTests=true"
+            MVN_ARGS="$MVN_ARGS '-Darguments=-DskipStatic=true -DskipTests=true'"
           fi
 
-          mvn -B \
-            -Dtag=${{ steps.version.outputs.tag }} \
-            -DreleaseVersion=${{ steps.version.outputs.release_version }} \
-            -DdevelopmentVersion=${{ steps.version.outputs.dev_version }} \
-            release:prepare -Prelease "$SKIP_ARGS"
+          eval mvn $MVN_ARGS release:prepare -Prelease
 
       - name: Maven Release Prepare (Test Run)
         if: inputs.test_run == true
