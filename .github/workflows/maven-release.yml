@@ -192,7 +192,6 @@ jobs:
         with:
           java-version: ${{ steps.jdk.outputs.version }}
           distribution: 'temurin'
-          cache: 'maven'
 
       - name: Generate App Token
         id: app-token
