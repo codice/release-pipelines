@@ -330,7 +330,7 @@ jobs:
           
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
             echo "🧪 TEST RUN - Would push tag: $TAG"
-            [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]] && echo "🧪 TEST RUN - Would push branch: $BRANCH"
+            if [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]]; then echo "🧪 TEST RUN - Would push branch: $BRANCH"; fi
           else
             git push origin "$TAG"
             if [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]]; then
