@@ -352,6 +352,12 @@ jobs:
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
             echo "🧪 TEST RUN - Would deploy to GitHub Packages"
           else
+            # Debug: verify settings.xml has credentials
+            echo "Settings.xml server IDs:"
+            grep '<id>' ~/.m2/settings.xml || echo "No server IDs found!"
+            echo "GitHub server password length: $(grep -A2 '<id>github</id>' ~/.m2/settings.xml | grep password | sed 's/.*<password>//' | sed 's/<.*//' | wc -c)"
+            echo "Token prefix: ${GITHUB_TOKEN:0:8}..."
+
             REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
             mvn deploy -Prelease \
               -DskipStatic=true -DskipTests=true \
