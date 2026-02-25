@@ -352,9 +352,12 @@ jobs:
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
             echo "🧪 TEST RUN - Would deploy to GitHub Packages"
           else
+            REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
             mvn deploy -Prelease \
               -DskipStatic=true -DskipTests=true \
-              -DretryFailedDeploymentCount=10
+              -DretryFailedDeploymentCount=10 \
+              -Dreleases.repository.url="$REPO_URL" \
+              -Dsnapshots.repository.url="$REPO_URL"
           fi
 
       - name: Find Artifacts
