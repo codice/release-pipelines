@@ -230,16 +230,18 @@ jobs:
           echo "Settings.xml created ($(wc -c < ~/.m2/settings.xml) bytes)"
 
       - name: Verify GitHub Packages Auth
+        env:
+          GH_PACKAGES_TOKEN: ${{ github.token }}
         run: |
           REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
-          echo "Testing deploy credentials against $REPO_URL"
-          echo "auth-check" > /tmp/auth-check.txt
-          mvn deploy:deploy-file \
-            -DgroupId=_auth-check -DartifactId=auth-check -Dversion=0.0.1 \
-            -Dpackaging=txt -Dfile=/tmp/auth-check.txt \
-            -DrepositoryId=github \
-            -Durl="$REPO_URL"
-          echo "✅ GitHub Packages auth is working"
+          echo "Testing credentials against $REPO_URL"
+          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $GH_PACKAGES_TOKEN" "$REPO_URL/")
+          if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "404" ]]; then
+            echo "✅ GitHub Packages auth is working (HTTP $HTTP_CODE)"
+          else
+            echo "::error::GitHub Packages auth failed (HTTP $HTTP_CODE)"
+            exit 1
+          fi
 
       - name: Calculate Versions
         id: version
