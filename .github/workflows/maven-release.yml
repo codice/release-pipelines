@@ -221,8 +221,11 @@ jobs:
         run: |
           mkdir -p ~/.m2
           printf '<settings>\n  <servers>\n    <server>\n      <id>github</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>codice</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>connexta</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$DEPLOY_TOKEN" "$READ_TOKEN" "$READ_TOKEN" > ~/.m2/settings.xml
-          echo "Settings.xml created. Server IDs: $(grep '<id>' ~/.m2/settings.xml | tr -d ' ' | tr '\n' ' ')"
-          echo "GitHub server password length: $(xmllint --xpath 'string(//server[id="github"]/password)' ~/.m2/settings.xml 2>/dev/null | wc -c || grep -A1 'id>github' ~/.m2/settings.xml | grep password | sed 's/.*<password>//' | sed 's/<.*//' | wc -c)"
+          echo "DEPLOY_TOKEN length: ${#DEPLOY_TOKEN}"
+          echo "READ_TOKEN length: ${#READ_TOKEN}"
+          echo "Settings.xml size: $(wc -c < ~/.m2/settings.xml) bytes"
+          echo "Settings.xml content (tokens redacted):"
+          sed 's/<password>.*</<password>[REDACTED]</g' ~/.m2/settings.xml
 
       - name: Verify GitHub Packages Auth
         run: |
