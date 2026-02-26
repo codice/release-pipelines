@@ -215,34 +215,16 @@ jobs:
           git config http.https://github.com/.extraheader "Authorization: Basic $(echo -n 'x-access-token:${{ steps.app-token.outputs.token }}' | base64 -w0)"
 
       - name: Create Maven Settings
-        run: |
-          mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml << 'SETTINGS_EOF'
-          <settings>
-            <servers>
-              <server>
-                <id>github</id>
-                <username>${env.DEPLOY_TOKEN}</username>
-                <password>${env.DEPLOY_TOKEN}</password>
-              </server>
-              <server>
-                <id>codice</id>
-                <username>${env.READ_TOKEN}</username>
-                <password>${env.READ_TOKEN}</password>
-              </server>
-              <server>
-                <id>connexta</id>
-                <username>${env.READ_TOKEN}</username>
-                <password>${env.READ_TOKEN}</password>
-              </server>
-            </servers>
-          </settings>
-          SETTINGS_EOF
-
-      - name: Verify GitHub Packages Auth
         env:
           DEPLOY_TOKEN: ${{ steps.app-token.outputs.token }}
           READ_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p ~/.m2
+          printf '<settings>\n  <servers>\n    <server>\n      <id>github</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>codice</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>connexta</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$DEPLOY_TOKEN" "$READ_TOKEN" "$READ_TOKEN" > ~/.m2/settings.xml
+          echo "Settings.xml created. Server IDs: $(grep '<id>' ~/.m2/settings.xml | tr -d ' ' | tr '\n' ' ')"
+          echo "GitHub server password length: $(xmllint --xpath 'string(//server[id="github"]/password)' ~/.m2/settings.xml 2>/dev/null | wc -c || grep -A1 'id>github' ~/.m2/settings.xml | grep password | sed 's/.*<password>//' | sed 's/<.*//' | wc -c)"
+
+      - name: Verify GitHub Packages Auth
         run: |
           REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
           echo "Testing deploy credentials against $REPO_URL"
@@ -256,9 +238,6 @@ jobs:
 
       - name: Calculate Versions
         id: version
-        env:
-          DEPLOY_TOKEN: ${{ steps.app-token.outputs.token }}
-          READ_TOKEN: ${{ github.token }}
         run: |
           # Get current version from pom.xml
           CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
@@ -320,8 +299,6 @@ jobs:
         if: inputs.test_run == false
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          DEPLOY_TOKEN: ${{ steps.app-token.outputs.token }}
-          READ_TOKEN: ${{ github.token }}
         run: |
           MVN_ARGS="-B -Dtag=${{ steps.version.outputs.tag }}"
           MVN_ARGS="$MVN_ARGS -DreleaseVersion=${{ steps.version.outputs.release_version }}"
@@ -365,8 +342,6 @@ jobs:
       - name: Maven Deploy
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
-          DEPLOY_TOKEN: ${{ steps.app-token.outputs.token }}
-          READ_TOKEN: ${{ github.token }}
         run: |
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
             echo "🧪 TEST RUN - Would deploy to GitHub Packages"
