@@ -345,8 +345,15 @@ jobs:
         run: git checkout ${{ steps.version.outputs.tag }} -b release-tmp
 
       - name: Docker Login
-        if: inputs.test_run == false && secrets.dockerhub_username != ''
-        run: echo "${{ secrets.dockerhub_token }}" | docker login -u "${{ secrets.dockerhub_username }}" --password-stdin
+        if: inputs.test_run == false
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.dockerhub_username }}
+        run: |
+          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
+            echo "${{ secrets.dockerhub_token }}" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "No Docker Hub credentials provided, skipping login"
+          fi
 
       - name: Maven Deploy
         env:
