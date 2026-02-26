@@ -114,6 +114,12 @@ on:
       app_private_key:
         description: 'GitHub App private key'
         required: true
+      dockerhub_username:
+        description: 'Docker Hub username'
+        required: false
+      dockerhub_token:
+        description: 'Docker Hub token'
+        required: false
 
 jobs:
   preflight:
@@ -337,6 +343,10 @@ jobs:
       - name: Checkout Tag for Deploy
         if: inputs.test_run == false
         run: git checkout ${{ steps.version.outputs.tag }} -b release-tmp
+
+      - name: Docker Login
+        if: inputs.test_run == false && secrets.dockerhub_username != ''
+        run: echo "${{ secrets.dockerhub_token }}" | docker login -u "${{ secrets.dockerhub_username }}" --password-stdin
 
       - name: Maven Deploy
         env:
