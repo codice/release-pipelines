@@ -242,6 +242,18 @@ jobs:
           </settings>
           EOF
 
+      - name: Verify GitHub Packages Auth
+        run: |
+          REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
+          echo "Testing deploy credentials against $REPO_URL"
+          echo "auth-check" > /tmp/auth-check.txt
+          mvn deploy:deploy-file \
+            -DgroupId=_auth-check -DartifactId=auth-check -Dversion=0.0.1 \
+            -Dpackaging=txt -Dfile=/tmp/auth-check.txt \
+            -DrepositoryId=github \
+            -Durl="$REPO_URL" 2>&1 | tail -5
+          echo "✅ GitHub Packages auth is working"
+
       - name: Calculate Versions
         id: version
         run: |
