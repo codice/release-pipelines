@@ -106,6 +106,11 @@ on:
         required: false
         type: string
         default: 'release@example.com'
+      resume_from:
+        description: 'Resume failed deploy from module (e.g. groupId:artifactId). Skips release:prepare and push.'
+        required: false
+        type: string
+        default: ''
     
     secrets:
       app_id:
@@ -123,6 +128,7 @@ on:
 
 jobs:
   preflight:
+    if: inputs.resume_from == ''
     runs-on: ubuntu-latest
     outputs:
       token: ${{ steps.app-token.outputs.token }}
@@ -175,6 +181,7 @@ jobs:
 
   release:
     needs: preflight
+    if: always() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped')
     runs-on: ubuntu-latest
     
     outputs:
@@ -244,64 +251,82 @@ jobs:
       - name: Calculate Versions
         id: version
         run: |
-          # Get current version from pom.xml
-          CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
-          echo "Resolved version: $CURRENT_VERSION"
-          BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
-          
           APP_NAME="${{ inputs.app_name }}"
           RELEASE_TYPE="${{ inputs.release_type }}"
-          BUILD_NUM=""
-          SNAPSHOT_BUILD=false
-          RC_BUILD=false
-          DEPLOY_PROFILE="${{ inputs.maven_deploy_profiles }}"
-          
-          case "$RELEASE_TYPE" in
-            Build)
-              BUILD_NUM="build_$(date +%Y%m%d%H%M)"
-              SNAPSHOT_BUILD=true
-              DEPLOY_PROFILE="${DEPLOY_PROFILE},codice-staging"
-              ;;
-            RC*)
-              BUILD_NUM="$RELEASE_TYPE"
-              RC_BUILD=true
-              ;;
-          esac
-          
-          # Calculate versions
-          if [[ -n "$BUILD_NUM" ]]; then
-            RELEASE_VERSION="${BASE_VERSION}-${BUILD_NUM}"
+          RESUME_FROM="${{ inputs.resume_from }}"
+
+          if [[ -n "$RESUME_FROM" ]]; then
+            # Resume mode: derive version from existing tag on this branch
+            TAG=$(git describe --tags --match "${APP_NAME}-*" --abbrev=0 2>/dev/null || true)
+            if [[ -z "$TAG" ]]; then
+              echo "::error::No existing ${APP_NAME}-* tag found on this branch for resume"
+              exit 1
+            fi
+            RELEASE_VERSION="${TAG#${APP_NAME}-}"
+            echo "::notice::Resume mode - using existing tag: $TAG (version: $RELEASE_VERSION)"
+            {
+              echo "tag=$TAG"
+              echo "release_version=$RELEASE_VERSION"
+              echo "dev_version="
+              echo "snapshot_build=false"
+              echo "rc_build=false"
+              echo "deploy_profile=${{ inputs.maven_deploy_profiles }}"
+            } >> $GITHUB_OUTPUT
           else
-            RELEASE_VERSION="$BASE_VERSION"
+            # Normal mode: calculate from POM
+            CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
+            echo "Resolved version: $CURRENT_VERSION"
+            BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
+
+            BUILD_NUM=""
+            SNAPSHOT_BUILD=false
+            RC_BUILD=false
+            DEPLOY_PROFILE="${{ inputs.maven_deploy_profiles }}"
+
+            case "$RELEASE_TYPE" in
+              Build)
+                BUILD_NUM="build_$(date +%Y%m%d%H%M)"
+                SNAPSHOT_BUILD=true
+                DEPLOY_PROFILE="${DEPLOY_PROFILE},codice-staging"
+                ;;
+              RC*)
+                BUILD_NUM="$RELEASE_TYPE"
+                RC_BUILD=true
+                ;;
+            esac
+
+            if [[ -n "$BUILD_NUM" ]]; then
+              RELEASE_VERSION="${BASE_VERSION}-${BUILD_NUM}"
+            else
+              RELEASE_VERSION="$BASE_VERSION"
+            fi
+
+            TAG="${APP_NAME}-${RELEASE_VERSION}"
+
+            if [[ "$SNAPSHOT_BUILD" == "true" ]]; then
+              DEV_VERSION="$CURRENT_VERSION"
+            elif [[ -n "${{ inputs.next_dev_version }}" ]]; then
+              DEV_VERSION="${{ inputs.next_dev_version }}"
+            else
+              MAJOR_MINOR="${BASE_VERSION%.*}"
+              PATCH="${BASE_VERSION##*.}"
+              DEV_VERSION="${MAJOR_MINOR}.$((PATCH + 1))-SNAPSHOT"
+            fi
+
+            {
+              echo "tag=$TAG"
+              echo "release_version=$RELEASE_VERSION"
+              echo "dev_version=$DEV_VERSION"
+              echo "snapshot_build=$SNAPSHOT_BUILD"
+              echo "rc_build=$RC_BUILD"
+              echo "deploy_profile=$DEPLOY_PROFILE"
+            } >> $GITHUB_OUTPUT
+
+            echo "::notice::Tag: $TAG | Version: $RELEASE_VERSION | Dev: $DEV_VERSION"
           fi
-          
-          TAG="${APP_NAME}-${RELEASE_VERSION}"
-          
-          # Next dev version
-          if [[ "$SNAPSHOT_BUILD" == "true" ]]; then
-            DEV_VERSION="$CURRENT_VERSION"
-          elif [[ -n "${{ inputs.next_dev_version }}" ]]; then
-            DEV_VERSION="${{ inputs.next_dev_version }}"
-          else
-            MAJOR_MINOR="${BASE_VERSION%.*}"
-            PATCH="${BASE_VERSION##*.}"
-            DEV_VERSION="${MAJOR_MINOR}.$((PATCH + 1))-SNAPSHOT"
-          fi
-          
-          # Output all values
-          {
-            echo "tag=$TAG"
-            echo "release_version=$RELEASE_VERSION"
-            echo "dev_version=$DEV_VERSION"
-            echo "snapshot_build=$SNAPSHOT_BUILD"
-            echo "rc_build=$RC_BUILD"
-            echo "deploy_profile=$DEPLOY_PROFILE"
-          } >> $GITHUB_OUTPUT
-          
-          echo "::notice::Tag: $TAG | Version: $RELEASE_VERSION | Dev: $DEV_VERSION"
 
       - name: Maven Release Prepare
-        if: inputs.test_run == false
+        if: inputs.test_run == false && inputs.resume_from == ''
         env:
           GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
@@ -315,7 +340,7 @@ jobs:
           eval mvn $MVN_ARGS release:prepare -Prelease
 
       - name: Maven Release Prepare (Test Run)
-        if: inputs.test_run == true
+        if: inputs.test_run == true && inputs.resume_from == ''
         run: |
           echo "🧪 TEST RUN - Would execute:"
           echo "mvn -B -Dtag=${{ steps.version.outputs.tag }} \\"
@@ -324,6 +349,7 @@ jobs:
           echo "  release:prepare -Prelease"
 
       - name: Push Tags and Commits
+        if: inputs.resume_from == ''
         run: |
           TAG="${{ steps.version.outputs.tag }}"
           BRANCH="${{ inputs.branch }}"
@@ -342,7 +368,14 @@ jobs:
 
       - name: Checkout Tag for Deploy
         if: inputs.test_run == false
-        run: git checkout ${{ steps.version.outputs.tag }} -b release-tmp
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            git checkout "$TAG" -b release-tmp
+          else
+            echo "::error::Tag $TAG not found"
+            exit 1
+          fi
 
       - name: Docker Login
         if: inputs.test_run == false
@@ -363,11 +396,17 @@ jobs:
             echo "🧪 TEST RUN - Would deploy to GitHub Packages"
           else
             REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
+            RESUME_ARGS=""
+            if [[ -n "${{ inputs.resume_from }}" ]]; then
+              RESUME_ARGS="-rf :${{ inputs.resume_from }}"
+              echo "Resuming deploy from module: ${{ inputs.resume_from }}"
+            fi
             mvn deploy -Prelease \
               -DskipStatic=true -DskipTests=true \
               -DretryFailedDeploymentCount=10 \
               -Dreleases.repository.url="$REPO_URL" \
-              -Dsnapshots.repository.url="$REPO_URL"
+              -Dsnapshots.repository.url="$REPO_URL" \
+              $RESUME_ARGS
           fi
 
       - name: Find Artifacts
