@@ -1,0 +1,81 @@
+# Reusable Maven CI Workflow
+#
+# Provides build verification for Maven projects. No deploy step.
+# Designed for repos that deploy via manual workflow_dispatch (maven-manual-deploy.yml).
+#
+# Usage:
+# ```yaml
+# name: CI
+# on:
+#   push:
+#     branches: [master, '[0-9]+.[0-9]+.x']
+#   pull_request:
+#     branches: [master, '[0-9]+.[0-9]+.x']
+# jobs:
+#   ci:
+#     uses: codice/release-pipelines/.github/workflows/maven-ci.yml@main
+# ```
+
+name: Maven CI (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      jdk_version:
+        description: 'JDK version'
+        required: false
+        type: string
+        default: '17'
+      maven_args:
+        description: 'Additional Maven arguments'
+        required: false
+        type: string
+        default: ''
+      timeout_minutes:
+        description: 'Job timeout in minutes'
+        required: false
+        type: number
+        default: 30
+
+env:
+  MAVEN_OPTS: '-Xmx4G -Xms1G -Djava.security.egd=file:/dev/./urandom --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/sun.reflect.annotation=ALL-UNNAMED -Djavax.xml.accessExternalDTD=all -Djavax.xml.accessExternalSchema=all'
+  MAVEN_CLI_OPTS: '-B -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn'
+
+jobs:
+  incremental-build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up JDK ${{ inputs.jdk_version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.jdk_version }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build
+        run: mvn clean install $MAVEN_CLI_OPTS -DskipTests ${{ inputs.maven_args }}
+
+  full-build:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ inputs.timeout_minutes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.jdk_version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.jdk_version }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build
+        run: mvn clean install $MAVEN_CLI_OPTS -DskipTests ${{ inputs.maven_args }}

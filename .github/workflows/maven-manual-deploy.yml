@@ -1,0 +1,123 @@
+# Reusable Manual Deploy Workflow
+#
+# Deploys Maven artifacts to GitHub Packages via workflow_dispatch.
+# Designed for repos with fixed release versions (no SNAPSHOT cycle)
+# where deploy should only happen on demand.
+#
+# Usage (single module):
+# ```yaml
+# name: Deploy
+# on:
+#   workflow_dispatch:
+# permissions:
+#   contents: read
+#   packages: write
+# jobs:
+#   deploy:
+#     uses: codice/release-pipelines/.github/workflows/maven-manual-deploy.yml@main
+# ```
+#
+# Usage (multi-module with per-module targeting):
+# ```yaml
+# name: Deploy
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       modules:
+#         description: 'Modules to deploy (comma-separated). Leave blank for all.'
+#         required: false
+# permissions:
+#   contents: read
+#   packages: write
+# jobs:
+#   deploy:
+#     uses: codice/release-pipelines/.github/workflows/maven-manual-deploy.yml@main
+#     with:
+#       modules: ${{ inputs.modules }}
+# ```
+
+name: Maven Manual Deploy (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      jdk_version:
+        description: 'JDK version'
+        required: false
+        type: string
+        default: '17'
+      modules:
+        description: 'Modules to deploy (comma-separated). Leave blank for all.'
+        required: false
+        type: string
+        default: ''
+      maven_args:
+        description: 'Additional Maven arguments'
+        required: false
+        type: string
+        default: ''
+
+env:
+  MAVEN_OPTS: '-Xmx4G -Xms1G -Djava.security.egd=file:/dev/./urandom --add-opens java.base/java.lang.reflect=ALL-UNNAMED --add-opens java.base/java.lang=ALL-UNNAMED --add-opens java.base/java.io=ALL-UNNAMED --add-opens java.base/java.util=ALL-UNNAMED --add-opens java.base/sun.reflect.annotation=ALL-UNNAMED -Djavax.xml.accessExternalDTD=all -Djavax.xml.accessExternalSchema=all'
+  MAVEN_CLI_OPTS: '-B -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ inputs.jdk_version }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ inputs.jdk_version }}
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Configure Maven settings
+        uses: s4u/maven-settings-action@v3.0.0
+        with:
+          servers: |
+            [{
+              "id": "releases",
+              "username": "${{ github.actor }}",
+              "password": "${{ github.token }}"
+            },
+            {
+              "id": "snapshots",
+              "username": "${{ github.actor }}",
+              "password": "${{ github.token }}"
+            }]
+
+      - name: Deploy selected modules
+        if: inputs.modules != ''
+        run: |
+          REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
+          IFS=',' read -ra MODULES <<< "${{ inputs.modules }}"
+          for module in "${MODULES[@]}"; do
+            module=$(echo "$module" | xargs)
+            echo "::group::Deploying $module"
+            mvn deploy $MAVEN_CLI_OPTS \
+              -pl "$module" \
+              -DskipTests=true \
+              -DretryFailedDeploymentCount=10 \
+              -Dreleases.repository.url="$REPO_URL" \
+              -Dsnapshots.repository.url="$REPO_URL" \
+              ${{ inputs.maven_args }}
+            echo "::endgroup::"
+          done
+
+      - name: Deploy all modules
+        if: inputs.modules == ''
+        run: |
+          REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
+          mvn deploy $MAVEN_CLI_OPTS \
+            -DskipTests=true \
+            -DretryFailedDeploymentCount=10 \
+            -Dreleases.repository.url="$REPO_URL" \
+            -Dsnapshots.repository.url="$REPO_URL" \
+            ${{ inputs.maven_args }}
