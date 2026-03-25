@@ -59,6 +59,16 @@ jobs:
           distribution: 'temurin'
           cache: maven
 
+      - name: Configure Maven settings
+        uses: s4u/maven-settings-action@v3.0.0
+        with:
+          servers: |
+            [{
+              "id": "codice",
+              "username": "${{ github.actor }}",
+              "password": "${{ github.token }}"
+            }]
+
       - name: Build
         run: mvn clean install $MAVEN_CLI_OPTS -DskipTests ${{ inputs.maven_args }}
 
@@ -76,6 +86,16 @@ jobs:
           java-version: ${{ inputs.jdk_version }}
           distribution: 'temurin'
           cache: maven
+
+      - name: Configure Maven settings
+        uses: s4u/maven-settings-action@v3.0.0
+        with:
+          servers: |
+            [{
+              "id": "codice",
+              "username": "${{ github.actor }}",
+              "password": "${{ github.token }}"
+            }]
 
       - name: Build
         run: mvn clean install $MAVEN_CLI_OPTS -DskipTests ${{ inputs.maven_args }}
