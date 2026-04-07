@@ -2,7 +2,7 @@
 #
 # Use this when:
 # - Release pipeline failed after tagging but during deploy
-# - Nexus lost artifacts and you need to republish
+# - Artifacts were lost and you need to republish
 # - You need to push to a different repository
 #
 # This does NOT:
@@ -35,10 +35,13 @@ on:
         default: false
         type: boolean
 
+env:
+  NEXUS_URL: https://repo.codice.org/repository
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Validate Tag Exists
         env:
@@ -46,13 +49,13 @@ jobs:
         run: |
           TAG="${{ inputs.tag }}"
           echo "Checking if tag '$TAG' exists..."
-          
+
           if ! gh api repos/${{ github.repository }}/git/refs/tags/${TAG} > /dev/null 2>&1; then
             echo "::error::Tag '$TAG' does not exist in this repository"
             exit 1
           fi
-          
-          echo "✅ Tag '$TAG' exists"
+
+          echo "Tag '$TAG' exists"
 
       - name: Setup JDK ${{ inputs.jdkVersion }}
         uses: actions/setup-java@v4
@@ -68,52 +71,44 @@ jobs:
           fetch-depth: 1
 
       - name: Create Maven Settings
+        env:
+          NEXUS_USERNAME: ${{ secrets.NEXUS_USERNAME }}
+          NEXUS_PASSWORD: ${{ secrets.NEXUS_PASSWORD }}
         run: |
           mkdir -p ~/.m2
-          cat > ~/.m2/settings.xml << 'EOF'
-          <settings>
-            <servers>
-              <server>
-                <id>github</id>
-                <username>${env.GITHUB_ACTOR}</username>
-                <password>${env.GITHUB_TOKEN}</password>
-              </server>
-            </servers>
-          </settings>
-          EOF
+          printf '<settings>\n  <servers>\n    <server>\n      <id>releases</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>snapshots</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$NEXUS_USERNAME" "$NEXUS_PASSWORD" "$NEXUS_USERNAME" "$NEXUS_PASSWORD" > ~/.m2/settings.xml
 
       - name: Verify Version Matches Tag
         run: |
           POM_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
           TAG="${{ inputs.tag }}"
-          
+
           echo "POM version: $POM_VERSION"
           echo "Tag: $TAG"
-          
-          # Extract version from tag (assumes format like "ddf-2.29.0" or "app-1.2.3")
+
           TAG_VERSION="${TAG##*-}"
-          
+
           if [[ "$POM_VERSION" != "$TAG_VERSION" ]]; then
             echo "::warning::POM version ($POM_VERSION) doesn't match tag version ($TAG_VERSION)"
             echo "This might be expected for some tag naming conventions"
           fi
 
       - name: Maven Deploy
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
         run: |
           if [[ "${{ inputs.testRun }}" == "true" ]]; then
-            echo "🧪 TEST RUN - Would execute:"
+            echo "TEST RUN - Would execute:"
             echo "mvn deploy -B -Prelease -DskipStatic=true -DskipTests=true -DretryFailedDeploymentCount=10"
             echo ""
             echo "Validating build would work..."
             mvn validate -B -Prelease
           else
-            echo "Deploying ${{ inputs.tag }} to GitHub Packages..."
+            echo "Deploying ${{ inputs.tag }} to Nexus..."
             mvn deploy -B -Prelease \
               -DskipStatic=true \
               -DskipTests=true \
               -DretryFailedDeploymentCount=10 \
+              -Dreleases.repository.url="${NEXUS_URL}/maven-releases/" \
+              -Dsnapshots.repository.url="${NEXUS_URL}/maven-snapshots/" \
               -Dorg.slf4j.simpleLogger.log.org.apache.maven.cli.transfer.Slf4jMavenTransferListener=warn
           fi
 
@@ -121,17 +116,17 @@ jobs:
         run: |
           cat >> $GITHUB_STEP_SUMMARY << EOF
           ## Re-deploy Summary
-          
+
           | Setting | Value |
           |---------|-------|
           | Tag | ${{ inputs.tag }} |
           | JDK | ${{ inputs.jdkVersion }} |
           | Test Run | ${{ inputs.testRun }} |
-          
+
           EOF
-          
+
           if [[ "${{ inputs.testRun }}" == "true" ]]; then
-            echo "⚠️ **TEST RUN - No artifacts were deployed**" >> $GITHUB_STEP_SUMMARY
+            echo "**TEST RUN - No artifacts were deployed**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "✅ **Artifacts deployed to GitHub Packages**" >> $GITHUB_STEP_SUMMARY
+            echo "**Artifacts deployed to Nexus**" >> $GITHUB_STEP_SUMMARY
           fi

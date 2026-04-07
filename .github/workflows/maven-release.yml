@@ -43,10 +43,10 @@
 #       jdk_version_map: '{"master":"17","2.29.x":"17","2.28.x":"11","2.27.x":"11","default":"11"}'
 #       artifact_path: 'distribution/ddf/target'
 #     secrets:
-#       ssh_key: ${{ secrets.RELEASE_SSH_KEY }}
+#       app_id: ${{ secrets.RELEASE_APP_ID }}
+#       app_private_key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
 #       nexus_username: ${{ secrets.NEXUS_USERNAME }}
 #       nexus_password: ${{ secrets.NEXUS_PASSWORD }}
-#       release_token: ${{ secrets.RELEASE_TOKEN }}
 # ```
 
 name: Maven Release (Reusable)
@@ -111,7 +111,7 @@ on:
         required: false
         type: string
         default: ''
-    
+
     secrets:
       app_id:
         description: 'GitHub App ID'
@@ -119,12 +119,21 @@ on:
       app_private_key:
         description: 'GitHub App private key'
         required: true
+      nexus_username:
+        description: 'Nexus username'
+        required: true
+      nexus_password:
+        description: 'Nexus password'
+        required: true
       dockerhub_username:
         description: 'Docker Hub username'
         required: false
       dockerhub_token:
         description: 'Docker Hub token'
         required: false
+
+env:
+  NEXUS_URL: https://repo.codice.org/repository
 
 jobs:
   preflight:
@@ -146,18 +155,15 @@ jobs:
         run: |
           REPO="${{ github.repository }}"
           BRANCH="${{ inputs.branch }}"
-          
+
           echo "Checking CI status for $REPO branch: $BRANCH"
-          
-          # Get the latest commit SHA for the branch
+
           COMMIT_SHA=$(gh api repos/${REPO}/branches/${BRANCH} --jq '.commit.sha')
           echo "Latest commit: $COMMIT_SHA"
-          
-          # Get combined status (for external CI systems)
+
           STATUS=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/status --jq '.state')
           echo "Combined status: $STATUS"
-          
-          # Check for check runs (GitHub Actions), excluding this workflow's own runs
+
           FAILED=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.conclusion == "failure" or .conclusion == "cancelled") and (.name | startswith("release /") | not))] | length')
           PENDING=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.status == "in_progress" or .status == "queued") and (.name | startswith("release /") | not))] | length')
 
@@ -171,31 +177,30 @@ jobs:
             gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '.check_runs[] | select(.conclusion == "failure" and (.name | startswith("release /") | not)) | "  - \(.name): \(.conclusion)"'
             exit 1
           fi
-          
+
           if [[ "$STATUS" == "failure" || "$STATUS" == "error" ]]; then
             echo "::error::Commit status is $STATUS. Fix before releasing."
             exit 1
           fi
-          
-          echo "✅ CI is green on $BRANCH"
+
+          echo "CI is green on $BRANCH"
 
   release:
     needs: preflight
     if: always() && (needs.preflight.result == 'success' || needs.preflight.result == 'skipped')
     runs-on: ubuntu-latest
-    
+
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       release_version: ${{ steps.version.outputs.release_version }}
-    
+
     steps:
       - name: Determine JDK Version
         id: jdk
         run: |
           JDK_MAP='${{ inputs.jdk_version_map }}'
           BRANCH="${{ inputs.branch }}"
-          
-          # Try to get version for specific branch, fall back to default
+
           VERSION=$(echo "$JDK_MAP" | jq -r --arg b "$BRANCH" '.[$b] // .default // "11"')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Using JDK $VERSION for branch $BRANCH"
@@ -227,26 +232,12 @@ jobs:
 
       - name: Create Maven Settings
         env:
-          GH_PACKAGES_TOKEN: ${{ github.token }}
-          READ_TOKEN: ${{ github.token }}
+          NEXUS_USERNAME: ${{ secrets.nexus_username }}
+          NEXUS_PASSWORD: ${{ secrets.nexus_password }}
         run: |
           mkdir -p ~/.m2
-          printf '<settings>\n  <servers>\n    <server>\n      <id>github</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>codice</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>connexta</id>\n      <username>x-access-token</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$GH_PACKAGES_TOKEN" "$READ_TOKEN" "$READ_TOKEN" > ~/.m2/settings.xml
-          echo "Settings.xml created ($(wc -c < ~/.m2/settings.xml) bytes)"
-
-      - name: Verify GitHub Packages Auth
-        env:
-          GH_PACKAGES_TOKEN: ${{ github.token }}
-        run: |
-          REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
-          echo "Testing credentials against $REPO_URL"
-          HTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: token $GH_PACKAGES_TOKEN" "$REPO_URL/")
-          if [[ "$HTTP_CODE" == "200" || "$HTTP_CODE" == "404" ]]; then
-            echo "✅ GitHub Packages auth is working (HTTP $HTTP_CODE)"
-          else
-            echo "::error::GitHub Packages auth failed (HTTP $HTTP_CODE)"
-            exit 1
-          fi
+          printf '<settings>\n  <servers>\n    <server>\n      <id>releases</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>snapshots</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$NEXUS_USERNAME" "$NEXUS_PASSWORD" "$NEXUS_USERNAME" "$NEXUS_PASSWORD" > ~/.m2/settings.xml
+          echo "Settings.xml created"
 
       - name: Calculate Versions
         id: version
@@ -256,7 +247,6 @@ jobs:
           RESUME_FROM="${{ inputs.resume_from }}"
 
           if [[ -n "$RESUME_FROM" ]]; then
-            # Resume mode: derive version from existing tag on this branch
             TAG=$(git describe --tags --match "${APP_NAME}-*" --abbrev=0 2>/dev/null || true)
             if [[ -z "$TAG" ]]; then
               echo "::error::No existing ${APP_NAME}-* tag found on this branch for resume"
@@ -273,7 +263,6 @@ jobs:
               echo "deploy_profile=${{ inputs.maven_deploy_profiles }}"
             } >> $GITHUB_OUTPUT
           else
-            # Normal mode: calculate from POM
             CURRENT_VERSION=$(mvn help:evaluate -Dexpression=project.version -q -DforceStdout)
             echo "Resolved version: $CURRENT_VERSION"
             BASE_VERSION="${CURRENT_VERSION%-SNAPSHOT}"
@@ -342,7 +331,7 @@ jobs:
       - name: Maven Release Prepare (Test Run)
         if: inputs.test_run == true && inputs.resume_from == ''
         run: |
-          echo "🧪 TEST RUN - Would execute:"
+          echo "TEST RUN - Would execute:"
           echo "mvn -B -Dtag=${{ steps.version.outputs.tag }} \\"
           echo "  -DreleaseVersion=${{ steps.version.outputs.release_version }} \\"
           echo "  -DdevelopmentVersion=${{ steps.version.outputs.dev_version }} \\"
@@ -355,10 +344,10 @@ jobs:
           BRANCH="${{ inputs.branch }}"
           SNAPSHOT="${{ steps.version.outputs.snapshot_build }}"
           RC="${{ steps.version.outputs.rc_build }}"
-          
+
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
-            echo "🧪 TEST RUN - Would push tag: $TAG"
-            if [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]]; then echo "🧪 TEST RUN - Would push branch: $BRANCH"; fi
+            echo "TEST RUN - Would push tag: $TAG"
+            if [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]]; then echo "TEST RUN - Would push branch: $BRANCH"; fi
           else
             git push origin "$TAG"
             if [[ "$SNAPSHOT" != "true" && "$RC" != "true" ]]; then
@@ -389,13 +378,10 @@ jobs:
           fi
 
       - name: Maven Deploy
-        env:
-          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
         run: |
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
-            echo "🧪 TEST RUN - Would deploy to GitHub Packages"
+            echo "TEST RUN - Would deploy to Nexus"
           else
-            REPO_URL="https://maven.pkg.github.com/${{ github.repository }}"
             RESUME_ARGS=""
             if [[ -n "${{ inputs.resume_from }}" ]]; then
               RESUME_ARGS="-rf :${{ inputs.resume_from }}"
@@ -404,8 +390,8 @@ jobs:
             mvn deploy -Prelease \
               -DskipStatic=true -DskipTests=true \
               -DretryFailedDeploymentCount=10 \
-              -Dreleases.repository.url="$REPO_URL" \
-              -Dsnapshots.repository.url="$REPO_URL" \
+              -Dreleases.repository.url="${NEXUS_URL}/maven-releases/" \
+              -Dsnapshots.repository.url="${NEXUS_URL}/maven-snapshots/" \
               $RESUME_ARGS
           fi
 
@@ -414,9 +400,7 @@ jobs:
         if: inputs.release_type == 'Release'
         run: |
           ARTIFACT_DIR="${{ inputs.artifact_path }}"
-          TAG="${{ steps.version.outputs.tag }}"
-          
-          # Look for zip files
+
           if [[ -d "$ARTIFACT_DIR" ]]; then
             FILES=$(find "$ARTIFACT_DIR" -maxdepth 1 -name "*.zip" -type f | tr '\n' ',' | sed 's/,$//')
             echo "files=$FILES" >> $GITHUB_OUTPUT
@@ -438,7 +422,7 @@ jobs:
         run: |
           APP="${{ inputs.app_name }}"
           VER="${{ steps.version.outputs.release_version }}"
-          
+
           TAGS=$(git tag -l "${APP}-${VER}-build_*" 2>/dev/null || true)
           if [[ -n "$TAGS" ]]; then
             echo "Removing snapshot tags: $TAGS"
@@ -461,9 +445,9 @@ jobs:
           | JDK | ${{ steps.jdk.outputs.version }} |
           | Test Run | ${{ inputs.test_run }} |
           SUMMARY
-          
+
           if [[ "${{ inputs.test_run }}" == "true" ]]; then
-            echo "⚠️ **TEST RUN - No changes were made**" >> $GITHUB_STEP_SUMMARY
+            echo "**TEST RUN - No changes were made**" >> $GITHUB_STEP_SUMMARY
           else
-            echo "✅ **Release completed successfully**" >> $GITHUB_STEP_SUMMARY
+            echo "**Release completed successfully**" >> $GITHUB_STEP_SUMMARY
           fi
