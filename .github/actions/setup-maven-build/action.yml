@@ -1,0 +1,66 @@
+# Composite action: standard "checkout + JDK + maven settings + (optional) free disk"
+# preamble used by every codice maven CI job. Centralizes node-runtime version
+# bumps for actions/checkout and actions/setup-java.
+#
+# Usage:
+#   - uses: codice/release-pipelines/.github/actions/setup-maven-build@main
+#     with:
+#       java-version: '21'
+#       fetch-depth: 0          # only when full history needed (incremental/sonar)
+#       free-disk-space: 'true' # only on jobs that build the full distribution
+
+name: Setup Maven Build
+description: Checkout, set up JDK, configure Maven settings, optionally free disk space.
+
+inputs:
+  java-version:
+    description: 'JDK major version'
+    required: false
+    default: '21'
+  java-distribution:
+    description: 'JDK distribution (temurin, corretto, etc.)'
+    required: false
+    default: 'temurin'
+  fetch-depth:
+    description: 'git history depth (0 = full)'
+    required: false
+    default: '1'
+  free-disk-space:
+    description: 'Reclaim runner disk before build'
+    required: false
+    default: 'false'
+  maven-settings-path:
+    description: 'Path inside the consumer repo to the settings.xml to install'
+    required: false
+    default: '.github/maven-settings.xml'
+
+runs:
+  using: composite
+  steps:
+    - name: Free disk space
+      if: inputs.free-disk-space == 'true'
+      shell: bash
+      run: |
+        sudo rm -rf /usr/share/dotnet
+        sudo rm -rf /usr/local/lib/android
+        sudo rm -rf /opt/ghc
+        df -h
+
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: ${{ inputs.fetch-depth }}
+
+    - name: Set up JDK ${{ inputs.java-version }}
+      uses: actions/setup-java@v4
+      with:
+        java-version: ${{ inputs.java-version }}
+        distribution: ${{ inputs.java-distribution }}
+        cache: maven
+
+    - name: Configure Maven settings
+      if: hashFiles(inputs.maven-settings-path) != ''
+      shell: bash
+      run: |
+        mkdir -p ~/.m2
+        cp "${{ inputs.maven-settings-path }}" ~/.m2/settings.xml
