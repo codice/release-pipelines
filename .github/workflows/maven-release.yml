@@ -164,8 +164,11 @@ jobs:
           STATUS=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/status --jq '.state')
           echo "Combined status: $STATUS"
 
-          FAILED=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.conclusion == "failure" or .conclusion == "cancelled") and (.name | startswith("release /") | not))] | length')
-          PENDING=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.status == "in_progress" or .status == "queued") and (.name | startswith("release /") | not))] | length')
+          # Exclude the release workflow's own checks (it's running now) and
+          # Dependabot's update-attempt jobs (they fail on lockfile resolution
+          # for git-based deps and don't represent CI breakage of the branch).
+          FAILED=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.conclusion == "failure" or .conclusion == "cancelled") and (.name | startswith("release /") | not) and (.name != "Dependabot"))] | length')
+          PENDING=$(gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '[.check_runs[] | select((.status == "in_progress" or .status == "queued") and (.name | startswith("release /") | not) and (.name != "Dependabot"))] | length')
 
           if [[ "$PENDING" -gt 0 ]]; then
             echo "::error::CI checks are still running. Wait for CI to complete."
@@ -174,7 +177,7 @@ jobs:
 
           if [[ "$FAILED" -gt 0 ]]; then
             echo "::error::CI is failing on $BRANCH. Fix CI before releasing."
-            gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '.check_runs[] | select(.conclusion == "failure" and (.name | startswith("release /") | not)) | "  - \(.name): \(.conclusion)"'
+            gh api repos/${REPO}/commits/${COMMIT_SHA}/check-runs --jq '.check_runs[] | select(.conclusion == "failure" and (.name | startswith("release /") | not) and (.name != "Dependabot")) | "  - \(.name): \(.conclusion)"'
             exit 1
           fi
 
