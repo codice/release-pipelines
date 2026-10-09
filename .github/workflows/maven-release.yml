@@ -242,6 +242,20 @@ jobs:
           printf '<settings>\n  <servers>\n    <server>\n      <id>releases</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n    <server>\n      <id>snapshots</id>\n      <username>%s</username>\n      <password>%s</password>\n    </server>\n  </servers>\n</settings>\n' "$NEXUS_USERNAME" "$NEXUS_PASSWORD" "$NEXUS_USERNAME" "$NEXUS_PASSWORD" > ~/.m2/settings.xml
           echo "Settings.xml created"
 
+      # Before release:prepare: its build pulls base images, and anonymous
+      # Docker Hub pulls from shared runner IPs hit the rate limit.
+      - name: Docker Login
+        if: inputs.test_run == false
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.dockerhub_username }}
+          DOCKERHUB_TOKEN: ${{ secrets.dockerhub_token }}
+        run: |
+          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
+            echo "$DOCKERHUB_TOKEN" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
+          else
+            echo "No Docker Hub credentials provided, skipping login"
+          fi
+
       - name: Calculate Versions
         id: version
         run: |
@@ -367,17 +381,6 @@ jobs:
           else
             echo "::error::Tag $TAG not found"
             exit 1
-          fi
-
-      - name: Docker Login
-        if: inputs.test_run == false
-        env:
-          DOCKERHUB_USERNAME: ${{ secrets.dockerhub_username }}
-        run: |
-          if [[ -n "$DOCKERHUB_USERNAME" ]]; then
-            echo "${{ secrets.dockerhub_token }}" | docker login -u "$DOCKERHUB_USERNAME" --password-stdin
-          else
-            echo "No Docker Hub credentials provided, skipping login"
           fi
 
       - name: Maven Deploy
